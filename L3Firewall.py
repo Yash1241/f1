@@ -1,4 +1,4 @@
-# L3Firewall.py (Corrected for OFPAT_DROP error and ready for Port Security)
+# L3Firewall.py (Final version for Python 2.7 compatibility and Port Security)
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
@@ -22,9 +22,9 @@ priority = 50000
 l2config = "l2firewall.config"
 l3config = "l3firewall.config"
 
-# --- Port Security Additions (from previous discussion) ---
-port_security_table = {}
-blocked_macs = set()
+# --- Port Security Additions ---
+port_security_table = {} # Stores {MAC_ADDRESS: IP_ADDRESS}
+blocked_macs = set() # Stores MACs that have been blocked due to spoofing
 # --- End Port Security Additions ---
 
 
@@ -32,8 +32,8 @@ class Firewall (EventMixin):
 
     def __init__ (self,l2config,l3config):
         self.listenTo(core.openflow)
-        self.disbaled_MAC_pair = [] # Store a tuple of MAC pair which will be installed into the flow table of each switch.
-        self.fwconfig = list()
+        self.disbaled_MAC_pair = [] # Stores a tuple of MAC pair which will be installed into the flow table of each switch.
+        self.fwconfig = list() # This variable seems unused, keeping it as is from original.
 
         # Read the CSV file for L2 firewall rules
         if l2config == "":
@@ -41,7 +41,7 @@ class Firewall (EventMixin):
             
         if l3config == "":
             l3config="l3firewall.config" 
-        with open(l2config, 'r') as rules: # Changed 'rb' to 'r' for text mode compatibility
+        with open(l2config, 'r') as rules: # Changed 'rb' to 'r' for text mode
             csvreader = csv.DictReader(rules)
             for line in csvreader:
                 if line['mac_0'] != 'any':
@@ -56,13 +56,13 @@ class Firewall (EventMixin):
                 self.disbaled_MAC_pair.append((mac_0,mac_1))
 
         # Read the CSV file for L3 firewall rules
-        with open(l3config, 'r') as csvfile: # Changed 'rb' to 'r' for text mode compatibility
+        # Load rules into a list so they can be iterated multiple times
+        with open(l3config, 'r') as csvfile: # Changed to 'r' for text mode, consistent
             log.debug("Reading L3 firewall config file !")
-            self.rules = csv.DictReader(csvfile)
-            self.l3_rules_list = [] # Store L3 rules as a list for later use
-            for row in self.rules:
-                self.l3_rules_list.append(row)
-                log.debug(f"Saving individual rule parameters in rule dict ! {row}") # f-string for better logging
+            # self.rules is now a list, not a DictReader iterator
+            self.l3_rules_list = list(csv.DictReader(csvfile)) # Store as a list
+            for row in self.l3_rules_list: # Iterate the list for initial debug
+                log.debug("Saving individual rule parameters in rule dict ! %s" % (row,)) # Python 2 compatible formatting
 
         log.debug("Enabling Firewall Module")
 
@@ -86,68 +86,54 @@ class Firewall (EventMixin):
         match = of.ofp_match()
         action = of.ofp_action_output(port = of.OFPP_NORMAL)
         msg.actions.append(action)
-        msg.priority = 1 # Lower priority to allow specific rules to take precedence
+        msg.priority = 1 # Lower priority
         event.connection.send(msg)
 
-    # --- MODIFIED: installFlow function ---
-    # Removed `action=of.OFPAT_DROP` from signature.
-    # Added `drop_packet` boolean flag to control action.
+    # MODIFIED: installFlow function to handle explicit drops and handle None values
     def installFlow(self, event, offset, srcmac, dstmac, srcip, dstip, sport, dport, nwproto, drop_packet=False):
         msg = of.ofp_flow_mod()
         match = of.ofp_match()
         
-        if srcip:
+        if srcip is not None:
             match.nw_src = IPAddr(srcip)
-        if dstip:
+        if dstip is not None:
             match.nw_dst = IPAddr(dstip)    
         
         if nwproto is not None:
             match.nw_proto = int(nwproto)
         
-        if srcmac:
+        if srcmac is not None:
             match.dl_src = srcmac
-        if dstmac:
+        if dstmac is not None:
             match.dl_dst = dstmac
         
-        if sport:
+        # Check if sport and dport are not None before converting to int
+        if sport is not None:
             match.tp_src = int(sport)
-        if dport:
+        if dport is not None:
             match.tp_dst = int(dport)
             
         match.dl_type = pkt.ethernet.IP_TYPE
         msg.match = match
         msg.hard_timeout = 0
         msg.idle_timeout = 200
-        msg.priority = priority + offset # This priority calculation needs to be careful with other rules        
+        msg.priority = priority + offset        
         
-        # --- Action based on drop_packet flag ---
+        # Action based on drop_packet flag
         if drop_packet:
             # For OpenFlow 1.0, omitting actions or using OFPP_NONE drops the packet
-            # msg.actions.append(of.ofp_action_output(port=of.OFPP_NONE)) # Explicit drop
-            log.debug(f"Installing DROP flow for match: {match}")
+            # msg.actions.append(of.ofp_action_output(port=of.OFPP_NONE)) # Explicit drop, optional
+            log.debug("Installing DROP flow for match: %s" % (match,)) # Python 2 compatible
         else:
-            # Default action for non-drop rules (e.g., allow to normal forwarding)
-            # You might need more specific forwarding actions here depending on your L3 rules
-            # For now, it will rely on other rules (like allowOther or l3_learning)
-            # or you can add a default output action if the rule is meant to forward.
-            # E.g., msg.actions.append(of.ofp_action_output(port=of.OFPP_FLOOD)) or to specific port
-            log.debug(f"Installing FORWARD flow for match: {match}")
-            # If this function is used to install forwarding rules, you need to add an action.
-            # Since your L3Firewall.py's `replyToIP` calls this after reading block rules,
-            # it might intend to just create a match to drop without explicit actions.
-            # If `l3firewall.config` defines BLOCKING rules, then simply omitting `msg.actions.append` is correct.
-            # If it's a mix, this `installFlow` needs to be more flexible.
-            # For now, we assume `installFlow` with default `drop_packet=False` implies letting other rules handle it
-            # or it's implicitly a drop if no action is explicitly added for a match.
-            pass # No action added, means packet will be dropped if no lower priority rule forwards it.
-        # --- End Action based on drop_packet flag ---
+            # If not dropping, add a forwarding action (e.g., normal forwarding)
+            msg.actions.append(of.ofp_action_output(port=of.OFPP_NORMAL))
+            log.debug("Installing FORWARD flow for match: %s" % (match,)) # Python 2 compatible
 
         event.connection.send(msg)
 
-    def replyToIP(self, packet, match, event, fwconfig):
-        # The fwconfig here refers to self.l3_rules_list
-        
-        for row in fwconfig: # Iterate over the loaded L3 rules
+    def replyToIP(self, packet, match, event, fwconfig_list): # Renamed fwconfig to fwconfig_list for clarity
+        # Iterate over the loaded L3 rules (which is now a list)
+        for row in fwconfig_list: 
             prio = row.get('priority')
             srcmac_rule = row.get('src_mac')
             dstmac_rule = row.get('dst_mac')
@@ -165,7 +151,7 @@ class Firewall (EventMixin):
             d_ip1 = d_ip_rule if d_ip_rule and d_ip_rule != 'any' else None
             s_port1 = int(s_port_rule) if s_port_rule and s_port_rule != 'any' else None
             d_port1 = int(d_port_rule) if d_port_rule and d_port_rule != 'any' else None
-            prio1 = int(prio) if prio is not None and prio != 'any' else priority
+            prio1 = int(prio) if prio is not None and prio != 'any' else priority # Corrected check for prio
 
             nw_proto1 = None
             if nw_proto_rule == "tcp":
@@ -178,10 +164,9 @@ class Firewall (EventMixin):
                 nw_proto1 = pkt.ipv4.UDP_PROTOCOL
             else:
                 log.debug("PROTOCOL field is mandatory in L3 config, Choose between ICMP, TCP, UDP or set to 'any'")
-                continue # Skip this rule if protocol is not valid or "any"
+                continue # Skip this rule if protocol is not valid
 
-            # This part attempts to install a flow rule for EACH L3 rule.
-            # Assuming L3 rules from config are meant to block, we call installFlow with drop_packet=True
+            # Call installFlow with drop_packet=True to install blocking rules
             self.installFlow(event, prio1, srcmac1, dstmac1, s_ip1, d_ip1, s_port1, d_port1, nw_proto1, drop_packet=True)
         
         # After attempting to install L3 specific rules, allow other traffic to flow normally.
@@ -194,7 +179,7 @@ class Firewall (EventMixin):
 
         # Install L2 blocking rules from l2firewall.config
         for (source, destination) in self.disbaled_MAC_pair:
-            print(f"Installing L2 block rule: {source} -> {destination}")
+            print "Installing L2 block rule: %s -> %s" % (source, destination) # Python 2 compatible print
             message = of.ofp_flow_mod()
             match = of.ofp_match()
             if source:
@@ -231,34 +216,26 @@ class Firewall (EventMixin):
             src_mac = packet.src
             src_ip = ip_packet.srcip
 
-            log.debug(f"PacketIn from {src_mac} (IP: {src_ip}) on port {event.port}")
+            log.debug("PacketIn from %s (IP: %s) on port %s" % (src_mac, src_ip, event.port)) # Python 2 compatible
 
             # 1. Check if this MAC is already permanently blocked due to a previous spoofing attempt
             if src_mac in blocked_macs:
-                log.info(f"Blocked MAC {src_mac} (IP: {src_ip}) attempted to send traffic. Dropping packet.")
+                log.info("Blocked MAC %s (IP: %s) attempted to send traffic. Dropping packet." % (src_mac, src_ip)) # Python 2 compatible
                 return # Drop the packet by not processing it further
 
             # 2. Implement Port Security Pseudo-code:
-            # For any newly received flow, F originated from the source MAC address F.SrcMAC;
-            # if F.SrcIP is new;
-            #     update PT with the mapping F.SrcMAC <--> F.SrcIP;
-            # else
-            #     block F.SrcMAC % Block a MAC address that had spoofed multiple IP addresses
-            # end
-
             if src_mac not in port_security_table:
                 # First time seeing this MAC, record its associated IP
-                log.info(f"Port Security: New MAC-IP mapping established: {src_mac} <--> {src_ip}")
+                log.info("Port Security: New MAC-IP mapping established: %s <--> %s" % (src_mac, src_ip)) # Python 2 compatible
                 port_security_table[src_mac] = src_ip
             else:
                 # MAC is known, check if the IP is consistent
                 expected_ip = port_security_table[src_mac]
                 if src_ip != expected_ip:
                     # Port security violation detected!
-                    log.warning(f"Port Security VIOLATION: MAC {src_mac} (expected IP: {expected_ip}) is spoofing IP {src_ip}. Blocking this MAC permanently.")
+                    log.warning("Port Security VIOLATION: MAC %s (expected IP: %s) is spoofing IP %s. Blocking this MAC permanently." % (src_mac, expected_ip, src_ip)) # Python 2 compatible
                     
-                    # Add MAC to `blocked_macs` to prevent repeated detection and rule installations
-                    blocked_macs.add(src_mac)
+                    blocked_macs.add(src_mac) # Add MAC to `blocked_macs`
 
                     # Install a flow rule to block all future traffic from this source MAC
                     msg = of.ofp_flow_mod()
@@ -268,17 +245,17 @@ class Firewall (EventMixin):
                     msg.idle_timeout = 0 # Don't expire
                     msg.hard_timeout = 0 # Don't expire
                     # No actions means drop the packet implicitly for OpenFlow 1.0
-                    # Or explicitly: msg.actions.append(of.ofp_action_output(port=of.OFPP_NONE))
                     event.connection.send(msg)
 
-                    log.info(f"Port Security: Installed flow rule to block ALL traffic from malicious MAC: {src_mac}.")
+                    log.info("Port Security: Installed flow rule to block ALL traffic from malicious MAC: %s." % (src_mac,)) # Python 2 compatible
                     return # Drop the current spoofed packet by not processing it further
 
             # If the packet passed port security, proceed with other IP-related firewall rules/forwarding
-            # Your existing `replyToIP` function will then be called to apply L3 rules.
             self.replyToIP(packet, match, event, self.l3_rules_list)
 
-        # If it's not ARP or IP, it will be implicitly handled by `l3_learning` or `allowOther` if it's installed.
 
 def launch (l2config="l2firewall.config",l3config="l3firewall.config"):
-    core.registerNew(Firewall, l2config, l3config)
+    # The argparse part in the original L3Firewall.py is only needed if launching directly
+    # with `python L3Firewall.py`. When launched via pox.py, arguments are passed positionally.
+    # We will remove the argparse specific lines as they are redundant for typical POX launch.
+    core.registerNew(Firewall,l2config,l3config)
