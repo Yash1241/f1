@@ -1,5 +1,5 @@
 from pox.core import core
-# Import the entire libopenflow_01 module and reference constants/classes via 'of.'
+# ONLY import the module, then reference everything via 'of.'
 import pox.openflow.libopenflow_01 as of
 from pox.lib.addresses import IPAddr, EthAddr
 from pox.lib.util import dpid_to_str
@@ -87,7 +87,7 @@ class Firewall (EventMixin):
         log.debug("Installing output flow with actions for match: %s" % (match,))
         msg.actions.append(of.ofp_action_output(port=of.OFPP_NORMAL)) # Forward out normal ports
     else: # Default to OFPP_NORMAL if action_type is None or unrecognized
-        log.debug("Installing default (OFPP_NORMAL) output flow for match: %s" % (match,))
+        log.debug("Installing default (of.OFPP_NORMAL) output flow for match: %s" % (match,))
         msg.actions.append(of.ofp_action_output(port=of.OFPP_NORMAL))
 
     if hasattr(self, 'connection') and self.connection:
@@ -140,11 +140,10 @@ class Firewall (EventMixin):
     # --- 4. Default Learning Switch Behavior (if not blocked by above rules) ---
     # This handles ARP and legitimate IP traffic
     if packet.type == pkt.ethernet.ARP_TYPE:
-        # Handle ARP for network discovery and learning
-        if packet.next.opcode == pkt.arp.REQUEST:
-            # Send ARP reply
-            self._send_arp_reply(packet, event.connection, event.port)
-            return # ARP handled, no further processing for this packet
+        # For ARP, just let it pass through the learning switch logic.
+        # The switch will flood it, and learning will happen.
+        # No explicit ARP reply is needed from the controller unless it's acting as a proxy.
+        pass # Allow ARP to fall through to the general learning/forwarding rule below
 
     # For any other legitimate traffic (including IP packets that passed spoofing checks)
     # The learning switch logic. Install a flow for the specific match.
@@ -153,7 +152,6 @@ class Firewall (EventMixin):
     
     # If the packet is not handled by a flow, send it out as a packet_out to allow learning/flooding
     # This acts as a fallback for the very first packet of a flow before a flow rule is installed.
-    # It's crucial for the switch to learn routes if a flow wasn't already matched.
     msg = of.ofp_packet_out(data=packet.pack())
     msg.actions.append(of.ofp_action_output(port=of.OFPP_NORMAL))
     event.connection.send(msg)
@@ -178,63 +176,8 @@ class Firewall (EventMixin):
         log.info("Re-installed block flow for spoofing MAC %s on switch %s" % (mac, dpid_to_str(event.dpid)))
         
     # Install a lower priority default rule to flood or act as a learning switch
-    # This ensures that traffic not matched by higher priority rules is still handled.
-    # It effectively means "if nothing else matches, send to normal learning behavior."
     self.install_flow(of.ofp_match(), action_type=of.OFPAT_OUTPUT, priority=1, idle_timeout=0, hard_timeout=0)
     log.info("Installed low-priority default forwarding rule for learning.")
-
-
-  def _send_arp_reply(self, packet, connection, in_port):
-    """Sends an ARP reply for ARP requests."""
-    r = pkt.arp()
-    r.opcode = pkt.arp.REPLY
-    r.hwsrc = EthAddr("FF:FF:FF:FF:FF:FF") # Dummy MAC for switch to reply, or actual if switch has one
-    # For a simple learning switch, the controller does not own IPs.
-    # Instead, we are just allowing ARP to pass or helping resolve if it's a direct request.
-    # If the switch needs to act as a proxy ARP, it needs to know IP-MAC mappings.
-    # For this task, we let the hosts resolve their ARPs. The controller mainly focuses on flow rules.
-    # The standard behavior is to forward ARP packets to OFPP_NORMAL if not handled by a specific rule.
-    # This _send_arp_reply is more useful if the controller itself needs to reply to an ARP.
-    # For a transparent learning switch, ARPs are usually just flooded until MACs are learned.
-
-    # Re-evaluating the ARP handling for a standard learning switch with port security.
-    # The default learning switch behavior (via `install_flow` with OFPP_NORMAL and `ofp_packet_out` to OFPP_NORMAL)
-    # usually takes care of ARP flooding for learning.
-    # Explicitly replying as the controller should only be done if the controller IS the ARP responder.
-    # For this firewall, we mostly want to allow ARP for hosts to discover each other, and only block IP after detection.
-
-    # Therefore, let's simplify and rely on the allow/learning path for ARP packets,
-    # and only implement explicit ARP replies if needed for a specific scenario (e.g., controller acting as gateway).
-    # For this task, the general learning switch behavior should suffice for ARP.
-    
-    # Keeping the original intent of allowing ARP through.
-    # The important part is that spoofing detection only applies to IP traffic.
-    # Thus, if this function is called, it means we are allowing an ARP, possibly sending a reply or just forwarding.
-    
-    # For simplicity in this firewall context, allow ARPs to fall through to learning.
-    # Remove explicit ARP reply if not strictly needed for the lab's specific ARP requirements.
-    # For a pure port-security, ARPs are generally allowed for hosts to communicate.
-    
-    # The previous code for _send_arp_reply and replyToARP was:
-    # def replyToARP(self, packet, match, event):
-    #     r = pkt.arp()
-    #     r.opcode = pkt.arp.REPLY
-    #     r.hwdst = match.dl_src
-    #     r.protosrc = match.nw_dst
-    #     r.protodst = match.nw_src
-    #     r.hwsrc = match.dl_dst
-    #     e = pkt.ethernet(type=packet.ARP_TYPE, src = r.hwsrc, dst=r.hwdst)
-    #     e.set_payload(r)
-    #     msg = of.ofp_packet_out()
-    #     msg.data = e.pack()
-    #     msg.actions.append(of.ofp_action_output(port=of.OFPP_IN_PORT))
-    #     msg.in_port = event.port
-    #     event.connection.send(msg)
-
-    # It seems the goal was to allow ARP to pass, so letting it fall through to the default learning switch behavior is fine.
-    # The current PacketIn handler's ARP check `if packet.type == pkt.ethernet.ARP_TYPE:`
-    # and then the `install_flow` and `ofp_packet_out` will handle ARPs by allowing them to be learned/flooded.
-    pass # Removing the explicit reply, relying on learning switch for ARPs for this simplified case.
 
 
 def launch (l2config="l2firewall.config", l3config="l3firewall.config"):
