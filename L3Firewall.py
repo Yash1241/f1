@@ -197,6 +197,7 @@ class Firewall (EventMixin):
         self.allowOther(event)
 
     def _handle_PacketIn(self, event):
+
         packet = event.parsed
         if not packet.parsed:
             log.warning("Ignoring incomplete packet")
@@ -255,7 +256,4 @@ class Firewall (EventMixin):
 
 
 def launch (l2config="l2firewall.config",l3config="l3firewall.config"):
-    # The argparse part in the original L3Firewall.py is only needed if launching directly
-    # with `python L3Firewall.py`. When launched via pox.py, arguments are passed positionally.
-    # We will remove the argparse specific lines as they are redundant for typical POX launch.
     core.registerNew(Firewall,l2config,l3config)
